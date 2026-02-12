@@ -1,0 +1,58 @@
+:root {
+  --stage-w: 1200px;
+  --stage-h: 800px;
+}
+
+/* viewer.css */
+
+/* Page baseline */
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: black;
+  width: 100%;
+  height: 100%;
+}
+
+/* Fixed stage that never changes size */
+.stage {
+  width: 1200px;   /* change this later if you want */
+  height: 800px;   /* change this later if you want */
+  margin: 60px auto; /* centers it */
+  border: 1px solid white;
+  background: black;
+  overflow: hidden;
+
+  /* Optional: keeps layout stable */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Frame scales into the fixed box without squishing */
+#frame {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;   /* preserves aspect ratio */
+  image-rendering: pixelated; /* helps preserve the “character pixel” feel */
+  display: block;
+}
+
+.top-bar {
+  position: fixed;
+  top: 20px;
+  left: 20px;
+  z-index: 1000;
+}
+
+.back-link {
+  display: inline-block;
+  padding: 6px 12px;
+  border: 1px solid white;
+  color: white;
+  text-decoration: none;
+  font-family: Consolas, monospace;
+  font-size: 12px;
+  background-color: black;
+}

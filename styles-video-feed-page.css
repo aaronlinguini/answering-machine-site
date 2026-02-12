@@ -1,0 +1,70 @@
+/* styles-video-feed-page.css */
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: black;
+  color: white;
+  font-family: Consolas, monospace;
+  overflow: hidden;
+}
+
+/* Top controls */
+.ui {
+  position: fixed;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 10;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+
+button,
+select {
+  font-family: Consolas, monospace;
+  font-size: 12px;
+  background: black;
+  color: white;
+  border: 1px solid white;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* Fixed stage (this is the only thing that sets the render size) */
+.stage {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+
+  width: 1200px;   /* change size here */
+  height: 800px;   /* change size here */
+
+  border: 1px solid white;
+  background: black;
+  overflow: hidden;
+}
+
+/* Canvas fills the stage and never uses vw/vh */
+.stage canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.column-label {
+  font-size: 12px;
+}
