@@ -101,19 +101,60 @@ window.addEventListener("DOMContentLoaded", () => {
   // =============================
   // RELAY CONNECT
   // =============================
+  // PURPOSE: Reconnect only when the browser fires a real close/error event.
+  let relayReconnectTimer = null;
+  let relayReconnectDelayMs = 800;
+  const RELAY_RECONNECT_MAX_MS = 8000;
+
+  function clearRelayReconnectTimer() {
+    if (relayReconnectTimer) {
+      clearTimeout(relayReconnectTimer);
+      relayReconnectTimer = null;
+    }
+  }
+
+  function scheduleRelayReconnect() {
+    // PURPOSE: Avoid reconnect storms.
+    if (relayReconnectTimer) return;
+
+    relayReconnectTimer = setTimeout(() => {
+      relayReconnectTimer = null;
+      connectRelay();
+    }, relayReconnectDelayMs);
+
+    relayReconnectDelayMs = Math.min(
+      RELAY_RECONNECT_MAX_MS,
+      Math.floor(relayReconnectDelayMs * 1.5)
+    );
+  }
+
   function connectRelay() {
+    clearRelayReconnectTimer();
+
+    // Close any existing socket cleanly before replacing it.
+    if (relaySocket && (relaySocket.readyState === 0 || relaySocket.readyState === 1)) {
+      try {
+        relaySocket.close();
+      } catch (e) {
+        // PURPOSE: Keep render running even if relay close throws.
+      }
+    }
+
     relaySocket = new WebSocket(RELAY_WS_URL);
 
     relaySocket.addEventListener("open", () => {
+      relayReconnectDelayMs = 800;
       log("Relay connected:", RELAY_WS_URL);
     });
 
     relaySocket.addEventListener("close", () => {
       log("Relay disconnected.");
+      scheduleRelayReconnect();
     });
 
     relaySocket.addEventListener("error", (e) => {
       log("Relay error:", e);
+      scheduleRelayReconnect();
     });
   }
 
@@ -460,7 +501,14 @@ window.addEventListener("DOMContentLoaded", () => {
     if (relaySocket.bufferedAmount > MAX_BUFFERED_BYTES) return;
 
     const frame = canvas.toDataURL(BROADCAST_FORMAT, BROADCAST_QUALITY);
-    relaySocket.send(frame);
+
+    // PURPOSE: If send throws, it counts as a real failure and we reconnect with backoff.
+    try {
+      relaySocket.send(frame);
+    } catch (e) {
+      log("Relay send error:", e);
+      scheduleRelayReconnect();
+    }
   }
 
   // =============================
