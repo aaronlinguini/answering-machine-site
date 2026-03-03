@@ -4,29 +4,65 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Video → Characters</title>
+
+    <!-- External stylesheet only (no inline styling) -->
     <link rel="stylesheet" href="styles-video-feed-page.css" />
+
+    <!-- Operator logic -->
     <script src="video-feed-page.js" defer></script>
   </head>
 
   <body>
+
+    <!-- =============================
+         OPERATOR UI CONTROLS
+         ============================= -->
     <div class="ui">
+
+      <!-- Capture controls -->
       <button id="btn-screen">Start screen share</button>
       <button id="btn-webcam">Start webcam</button>
       <button id="btn-stop" disabled>Stop</button>
+
+      <!-- Cycling controls -->
       <button id="btn-cycle" type="button">Cycle: OFF</button>
+      <button id="btn-cycle-all" type="button">Cycle ALL: OFF</button>
+      <button id="btn-pause" type="button">Pause</button>
+
+      <!-- Manual navigation controls -->
+      <button id="btn-manual-prev" type="button">Prev</button>
+      <button id="btn-manual-next" type="button">Next</button>
+
+      <!-- STATUS LINE
+           PURPOSE:
+           Always present so layout never shifts.
+           JS continuously updates its text. -->
+      <div id="manual-status">Column B: 0/0 — Ready</div>
+
+      <!-- Column selector -->
       <label class="column-label" for="column-select">Column</label>
-<select id="column-select">
-  <option value="1">B</option>
-  <option value="2">C</option>
-  <option value="3">D</option>
-  <option value="4">E</option>
-  <option value="5">F</option>
-</select>
-<button id="btn-cycle-all" type="button">Cycle ALL: OFF</button>
+
+      <select id="column-select">
+        <!-- NEW: allows selecting all columns as a scope -->
+        <option value="ALL">ALL</option>
+
+        <!-- These will still be dynamically rebuilt by JS
+             when columns are discovered from Google Sheets -->
+        <option value="1">B</option>
+        <option value="2">C</option>
+        <option value="3">D</option>
+        <option value="4">E</option>
+        <option value="5">F</option>
+      </select>
+
     </div>
 
+    <!-- =============================
+         RENDER STAGE
+         ============================= -->
     <div id="stage" class="stage">
       <canvas id="render"></canvas>
     </div>
+
   </body>
 </html>

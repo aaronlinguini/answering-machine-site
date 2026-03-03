@@ -1,7 +1,7 @@
 // video-feed-page.js
 // PURPOSE:
 // 1) Capture screen share or webcam.
-// 2) Fetch a character string from column B of a public Google Sheet (GViz).
+// 2) Fetch a character string from a public Google Sheet (GViz).
 // 3) Render live video as “colored text pixels” using the fetched string in order, repeated.
 // 4) Broadcast the rendered canvas frames to a WebSocket relay so viewers can see the same output.
 
@@ -20,12 +20,12 @@ const BROADCAST_QUALITY = 0.5;
 const SHEET_ID = "1uhvL6gKOnxxMY07sg2nkICktceQI_nCMi6AEbSMCMvM";
 const GID = "364222692";
 const SHEET_POLL_MS = 3000;
-const SHEET_VALUE_COL_INDEX = 1; // Column B
+const SHEET_VALUE_COL_INDEX = 1; // Column B (default)
 
 // =============================
 // RENDER TUNING
 // =============================
-//THIS is where you control THE RESOLUTION of the output (so how many characters make the image)
+// THIS is where you control THE RESOLUTION of the output (so how many characters make the image)
 const TARGET_COLS = 167;
 const MIN_CELL_SIZE = 6;
 
@@ -50,17 +50,35 @@ let cycleIndex = 0;
 // Cycle-all state (operator-controlled; affects everyone watching).
 let cycleAllEnabled = false;
 
-// How often to advance when cycling is ON.
-const CYCLE_EVERY_MS = 2500;
+// Pause state for cycling (operator-controlled; affects everyone watching).
+// PURPOSE: Pause stops cycling (turns it OFF) while preserving cycleIndex so resuming continues from the same line.
+let cyclePaused = false;
 
-// How many recent submissions to cycle through when cycling is ON.
+// Manual browse state (operator-controlled; affects everyone watching).
+// PURPOSE: Let the operator step up/down through entries in the selected scope (single column OR ALL).
+let manualEnabled = false;
+let manualList = []; // oldest -> newest
+let manualIndex = 0;
+
+// How often to advance when cycling is ON.
+let cycleIntervalMs = 2500;
+
+// How many recent submissions to use for lists (manual/cycle/latest).
 const CYCLE_MAX_RECENT = 30;
 
 // Which sheet column we are currently reading from (0-based): 1=B, 2=C, 3=D...
 let activeSheetColIndex = SHEET_VALUE_COL_INDEX;
 
-// Which columns are included in Cycle ALL mode (B..F by default).
+// Selected scope: either one column (by index) or ALL columns.
+let scopeIsAll = false;
+
+// Which columns are included in ALL-scope operations.
+// NOTE: This array is updated dynamically after each GViz poll so newly-added columns are included.
 const CYCLE_ALL_COLS = [1, 2, 3, 4, 5];
+
+// Remembers which cycling mode was active when Pause was pressed.
+// PURPOSE: Pause turns cycling OFF; this lets us resume the same mode later.
+let pausedMode = null; // "cycle" | "cycleAll" | null
 
 // Hidden video element used as the source.
 const video = document.createElement("video");
@@ -85,9 +103,28 @@ window.addEventListener("DOMContentLoaded", () => {
   // this will enable Cycle ALL controls on the operator page.
   const btnCycleAll = document.getElementById("btn-cycle-all");
 
+  // OPTIONAL: If you add a button with id="btn-pause" in video-feed-page.html,
+  // this will enable Pause/Resume for cycling.
+  // IMPORTANT: Pause STOPS cycling (turns it OFF) but preserves the current line.
+  const btnPause = document.getElementById("btn-pause");
+
   // OPTIONAL: If you add a select with id="column-select" in video-feed-page.html,
   // this will enable switching which sheet column we read from.
   const columnSelect = document.getElementById("column-select");
+
+  // OPTIONAL: If you add buttons with id="btn-manual-prev" / id="btn-manual-next" in video-feed-page.html,
+  // this will enable Prev/Next stepping:
+  // - If cycling is ON, Prev/Next stops cycling and steps the cycle list (wraps).
+  // - If cycling is OFF, Prev/Next steps the manual list for the selected scope (wraps).
+  const btnManualPrev = document.getElementById("btn-manual-prev");
+  const btnManualNext = document.getElementById("btn-manual-next");
+
+  // OPTIONAL: If you add a div with id="manual-status" in video-feed-page.html,
+  // this will show the unified status line.
+  // IMPORTANT: Status text format is ALWAYS:
+  //   COLUMN X : current / total
+  // where X is a column letter (B, C, D...) or ALL.
+  const manualStatus = document.getElementById("manual-status");
 
   const stage = document.getElementById("stage");
   const canvas = document.getElementById("render");
@@ -97,6 +134,41 @@ window.addEventListener("DOMContentLoaded", () => {
     if (obj !== undefined) console.log(msg, obj);
     else console.log(msg);
   }
+
+  // =============================
+  // STATUS LINE (UNIFIED / ALWAYS ON)
+  // =============================
+  // PURPOSE:
+  // - Always display a stable line so the UI layout doesn't shift.
+  // - Never display extra mode words ("manual", "latest", "cycle", etc).
+  // - Always display: "COLUMN X : current / total"
+  function setManualStatus(text) {
+    // PURPOSE: Single UI output location shared across ALL modes.
+    if (manualStatus) manualStatus.textContent = text;
+  }
+
+  function colIndexToLetter(idx) {
+    // PURPOSE: Convert 0-based column index to sheet letters (A, B, ..., Z, AA, AB...)
+    let n = idx + 1;
+    let s = "";
+    while (n > 0) {
+      const mod = (n - 1) % 26;
+      s = String.fromCharCode(65 + mod) + s;
+      n = Math.floor((n - 1) / 26);
+    }
+    return s;
+  }
+
+  function setUnifiedStatus(position, total) {
+    // PURPOSE: Centralized formatter so EVERY mode prints identical UI text.
+    const columnLabel = scopeIsAll ? "ALL" : colIndexToLetter(activeSheetColIndex);
+    const p = Number.isFinite(position) && position >= 0 ? position : 0;
+    const t = Number.isFinite(total) && total >= 0 ? total : 0;
+    setManualStatus(`COLUMN ${columnLabel} : ${p} / ${t}`);
+  }
+
+  // Ensure something is visible immediately.
+  setUnifiedStatus(0, 0);
 
   // =============================
   // RELAY CONNECT
@@ -210,17 +282,6 @@ window.addEventListener("DOMContentLoaded", () => {
     return table.rows.map((r) => (r.c || []).map((cell) => (cell ? cell.v : "")));
   }
 
-  function chooseLatestNonEmptyFromColumn(rows, colIndex) {
-    for (let i = rows.length - 1; i >= 0; i--) {
-      const cell = rows[i]?.[colIndex];
-      if (cell !== null && cell !== undefined) {
-        const val = String(cell);
-        if (val.length > 0) return val;
-      }
-    }
-    return "";
-  }
-
   function getRecentNonEmptyFromColumn(rows, colIndex, maxCount) {
     // PURPOSE: Collect up to maxCount most recent non-empty strings from a column.
     // IMPORTANT: Preserves exactly what the user entered (no trimming).
@@ -239,7 +300,7 @@ window.addEventListener("DOMContentLoaded", () => {
   }
 
   function getRecentNonEmptyFromMultipleColumns(rows, colIndices, maxPerCol) {
-    // PURPOSE: Build one combined list for Cycle ALL mode by pulling recent values from each column.
+    // PURPOSE: Build one combined list for ALL-scope operations by pulling recent values from each column.
     // Order is column-major (B, then C, then D...) while preserving each column’s internal order.
     const combined = [];
     for (const idx of colIndices) {
@@ -249,6 +310,355 @@ window.addEventListener("DOMContentLoaded", () => {
     return combined;
   }
 
+  // =============================
+  // COLUMN DISCOVERY (AUTO-POPULATE DROPDOWN)
+  // =============================
+  // PURPOSE:
+  // - Every time the Google Form adds a new question, the response sheet adds a new column.
+  // - GViz exposes those columns in gvizJson.table.cols.
+  // - We rebuild the dropdown from that live list so new columns become selectable automatically.
+  // - We filter out columns that have NO DATA so the dropdown stays clean.
+  function rebuildColumnSelectFromGviz(gvizJson, rows) {
+    if (!columnSelect) return;
+
+    const cols = gvizJson?.table?.cols;
+    if (!Array.isArray(cols) || cols.length === 0) return;
+
+    // PURPOSE: Skip column A (index 0). Google Forms response sheets usually store Timestamp there.
+    const firstPromptCol = cols.length > 1 ? 1 : 0;
+
+    // PURPOSE: Only show columns that have at least one non-empty value.
+    // This keeps the dropdown clean when new questions exist but have no submissions yet.
+    function columnHasAnyData(colIndex) {
+      for (let i = 0; i < rows.length; i++) {
+        const cell = rows[i]?.[colIndex];
+        if (cell === null || cell === undefined) continue;
+        const val = String(cell);
+        if (val.length > 0) return true;
+      }
+      return false;
+    }
+
+    // Preserve previous selection in a scope-aware way.
+    const prevRaw = String(columnSelect.value);
+    const prevScopeIsAll = prevRaw === "ALL";
+    const prevCol = Number(prevRaw);
+
+    // Rebuild options from live sheet metadata.
+    columnSelect.innerHTML = "";
+
+    // Always include ALL as the first option.
+    const optAll = document.createElement("option");
+    optAll.value = "ALL";
+    optAll.textContent = "ALL";
+    columnSelect.appendChild(optAll);
+
+    const included = [];
+
+    for (let i = firstPromptCol; i < cols.length; i++) {
+      if (!columnHasAnyData(i)) continue;
+
+      const letter = colIndexToLetter(i);
+      const label = String(cols[i]?.label ?? "").trim();
+
+      const opt = document.createElement("option");
+      opt.value = String(i);
+
+      // PURPOSE: Show question text when available.
+      // Example: "D — Prompt?" if your form question has that label.
+      // NOTE: Your unified status line STILL only prints "COLUMN D : x / y".
+      opt.textContent = label ? `${letter} — ${label}` : letter;
+
+      columnSelect.appendChild(opt);
+      included.push(i);
+    }
+
+    // PURPOSE: Keep a valid selection even when filtering removes columns.
+    if (!included.length) {
+      // If nothing has data yet, fall back to showing B (or first prompt col) so the UI isn't empty.
+      const fallback = firstPromptCol;
+
+      const letter = colIndexToLetter(fallback);
+      const label = String(cols[fallback]?.label ?? "").trim();
+
+      const opt = document.createElement("option");
+      opt.value = String(fallback);
+      opt.textContent = label ? `${letter} — ${label}` : letter;
+
+      columnSelect.appendChild(opt);
+
+      scopeIsAll = false;
+      columnSelect.value = String(fallback);
+      activeSheetColIndex = fallback;
+      return;
+    }
+
+    // Restore previous selection if it still exists.
+    if (prevScopeIsAll) {
+      scopeIsAll = true;
+      columnSelect.value = "ALL";
+      return;
+    }
+
+    const keepPrev = Number.isFinite(prevCol) && included.includes(prevCol);
+    const next = keepPrev ? prevCol : included[0];
+
+    scopeIsAll = false;
+    columnSelect.value = String(next);
+    activeSheetColIndex = next;
+  }
+
+  function getDynamicCycleAllCols(gvizJson) {
+    // PURPOSE: Include every prompt column that exists right now.
+    // Strategy: treat column A (index 0) as Timestamp, and include B onward.
+    const cols = gvizJson?.table?.cols;
+    if (!Array.isArray(cols)) return [1, 2, 3, 4, 5];
+
+    const out = [];
+    for (let i = 1; i < cols.length; i++) out.push(i);
+    return out;
+  }
+
+  function buildListForCurrentScope(rows) {
+    // PURPOSE:
+    // Single source of truth for list-building across modes:
+    // - Manual browsing uses this.
+    // - Cycling uses this.
+    // - Latest-only uses this.
+    if (scopeIsAll) {
+      return getRecentNonEmptyFromMultipleColumns(rows, CYCLE_ALL_COLS, CYCLE_MAX_RECENT);
+    }
+    return getRecentNonEmptyFromColumn(rows, activeSheetColIndex, CYCLE_MAX_RECENT);
+  }
+
+  // =============================
+  // MODE HELPERS
+  // =============================
+  function applyCycleButtonLabel() {
+    if (!btnCycle) return;
+    btnCycle.textContent = cycleEnabled ? "Cycle: ON" : "Cycle: OFF";
+  }
+
+  function applyCycleAllButtonLabel() {
+    if (!btnCycleAll) return;
+    btnCycleAll.textContent = cycleAllEnabled ? "Cycle ALL: ON" : "Cycle ALL: OFF";
+  }
+
+  function applyPauseButtonLabel() {
+    if (!btnPause) return;
+
+    // PURPOSE:
+    // Pause is meaningful in two cases:
+    // 1) Cycling is ON -> button reads "Pause"
+    // 2) Cycling is OFF because it was paused -> button reads "Resume"
+    if (cycleEnabled || cycleAllEnabled) {
+      btnPause.disabled = false;
+      btnPause.textContent = "Pause";
+      return;
+    }
+
+    if (cyclePaused) {
+      btnPause.disabled = false;
+      btnPause.textContent = "Resume";
+      return;
+    }
+
+    btnPause.disabled = true;
+    btnPause.textContent = "Pause";
+  }
+
+  function stopCyclingKeepIndex() {
+    // PURPOSE:
+    // - Stop auto-advance.
+    // - Preserve cycleIndex so resuming continues from the same line.
+    cycleEnabled = false;
+    cycleAllEnabled = false;
+
+    applyCycleButtonLabel();
+    applyCycleAllButtonLabel();
+    applyPauseButtonLabel();
+  }
+
+  // =============================
+  // MANUAL BROWSE HELPERS
+  // =============================
+  // PURPOSE:
+  // - Manual mode allows the operator to step through entries.
+  // - Status text ALWAYS stays: "COLUMN X : current / total"
+  function applyManualCharset() {
+    // PURPOSE: Apply currently selected manual entry to charset AND update status.
+    if (!manualList.length) {
+      setUnifiedStatus(0, 0);
+      return;
+    }
+
+    const N = manualList.length;
+
+    // Wrap index safely (circular navigation).
+    manualIndex = ((manualIndex % N) + N) % N;
+
+    const current = manualList[manualIndex];
+
+    // IMPORTANT: trailing space preserves visual blank pixels in renderer.
+    charset = current + " ";
+
+    setUnifiedStatus(manualIndex + 1, N);
+  }
+
+  function enableManualMode() {
+    // PURPOSE:
+    // Manual browsing cannot coexist with cycling modes.
+    manualEnabled = true;
+
+    cyclePaused = false;
+    pausedMode = null;
+    stopCyclingKeepIndex();
+
+    applyPauseButtonLabel();
+
+    // Immediately refresh list for selected scope.
+    pollSheetOnce().catch((e) => log("Sheet fetch error:", e));
+  }
+
+  function disableManualMode() {
+    // PURPOSE: Exit manual browsing cleanly.
+    manualEnabled = false;
+    manualList = [];
+    manualIndex = 0;
+  }
+
+  function stepManual(delta) {
+    // PURPOSE:
+    // Move forward/backward through entries with infinite wrapping.
+    if (!manualEnabled) enableManualMode();
+    if (!manualList.length) {
+      setUnifiedStatus(0, 0);
+      return;
+    }
+
+    const N = manualList.length;
+    manualIndex = ((manualIndex + delta) % N + N) % N;
+    applyManualCharset();
+  }
+
+  // =============================
+  // CYCLING STEP HELPERS
+  // =============================
+  // PURPOSE:
+  // - Apply cycleIndex -> charset.
+  // - Update unified COLUMN status line.
+  // - Navigation wraps infinitely.
+  function applyCycleCharsetFromIndex() {
+    if (!promptList.length) {
+      setUnifiedStatus(0, 0);
+      return;
+    }
+
+    const N = promptList.length;
+
+    // Wrap safely.
+    cycleIndex = ((cycleIndex % N) + N) % N;
+
+    const current = promptList[cycleIndex];
+
+    // Preserve renderer spacing behaviour.
+    charset = current + " ";
+
+    setUnifiedStatus(cycleIndex + 1, N);
+  }
+
+  function stepCycle(delta) {
+    if (!promptList.length) {
+      setUnifiedStatus(0, 0);
+      return;
+    }
+
+    const N = promptList.length;
+
+    // Wrap infinitely on both ends.
+    cycleIndex = ((cycleIndex + delta) % N + N) % N;
+
+    applyCycleCharsetFromIndex();
+  }
+
+  function setCycleSpeed(ms) {
+    // PURPOSE:
+    // Runtime adjustment of cycling speed.
+    // Restart timer so change applies immediately.
+    cycleIntervalMs = ms;
+    startCycleTimer();
+  }
+
+  // =============================
+  // PAUSE CONTROL (CYCLE)
+  // =============================
+  // REQUIREMENT YOU STATED:
+  // - Pressing Pause STOPS cycling (turns it OFF).
+  // - It stays on the current line.
+  // - Turning Cycle back ON resumes from that same line (cycleIndex preserved).
+  function pauseCycling() {
+    // PURPOSE:
+    // - Freeze on the current line.
+    // - Turn cycling OFF while keeping the index so resuming starts from the same line.
+    if (!cycleEnabled && !cycleAllEnabled) return;
+
+    cyclePaused = true;
+    pausedMode = cycleAllEnabled ? "cycleAll" : "cycle";
+
+    stopCyclingKeepIndex();
+
+    // Keep the current charset + status stable immediately.
+    applyCycleCharsetFromIndex();
+  }
+
+  function resumeCyclingFromPause(preferMode) {
+    // PURPOSE:
+    // - Resume whichever mode was paused.
+    // - If preferMode is provided ("cycle" or "cycleAll"), that wins.
+    if (!cyclePaused) return;
+
+    const mode = preferMode || pausedMode || "cycle";
+
+    cyclePaused = false;
+    pausedMode = null;
+
+    // Manual is mutually exclusive.
+    disableManualMode();
+    manualEnabled = false;
+
+    if (mode === "cycleAll") {
+      cycleAllEnabled = true;
+      cycleEnabled = false;
+    } else {
+      cycleEnabled = true;
+      cycleAllEnabled = false;
+    }
+
+    applyCycleButtonLabel();
+    applyCycleAllButtonLabel();
+    applyPauseButtonLabel();
+
+    // Poll refreshes promptList for the current scope and applies charset/status.
+    pollSheetOnce().catch((e) => log("Sheet fetch error:", e));
+  }
+
+  function togglePauseCycling() {
+    // PURPOSE:
+    // - If cycling is ON -> Pause it (turn it OFF).
+    // - If cycling is paused -> Resume it (turn it back ON).
+    if (cycleEnabled || cycleAllEnabled) pauseCycling();
+    else resumeCyclingFromPause();
+  }
+
+  if (btnPause) {
+    btnPause.addEventListener("click", () => {
+      togglePauseCycling();
+    });
+  }
+
+  // =============================
+  // SHEET POLL (ONE SHOT)
+  // =============================
   async function pollSheetOnce() {
     const url = buildGvizUrl();
     const res = await fetch(url, { cache: "no-store" });
@@ -257,41 +667,66 @@ window.addEventListener("DOMContentLoaded", () => {
     const gvizJson = parseGviz(text);
     const rows = gvizRows(gvizJson);
 
-    // Cycle ALL mode: build one combined list across multiple columns.
-    if (cycleAllEnabled) {
-      const list = getRecentNonEmptyFromMultipleColumns(rows, CYCLE_ALL_COLS, CYCLE_MAX_RECENT);
-      if (list.length) {
-        promptList = list;
-        if (cycleIndex >= promptList.length) cycleIndex = 0;
-        log("Updated prompt list from sheet (cycle all):", promptList.length);
+    // PURPOSE: Keep the operator dropdown synced to the sheet's current columns.
+    // This makes new Google Form questions appear automatically as selectable options.
+    // This also filters out columns that currently have NO DATA.
+    rebuildColumnSelectFromGviz(gvizJson, rows);
+
+    // PURPOSE: Keep ALL-scope columns synced to the sheet's current columns.
+    // This replaces the fixed B..F list with whatever exists now (B..last).
+    const dynamicCols = getDynamicCycleAllCols(gvizJson);
+    CYCLE_ALL_COLS.splice(0, CYCLE_ALL_COLS.length, ...dynamicCols);
+
+    // Build the list for the current scope once, then route it to the current mode.
+    const scopeList = buildListForCurrentScope(rows);
+
+    // Manual mode: browse the scope list and apply current selection.
+    if (manualEnabled) {
+      manualList = scopeList;
+
+      if (manualList.length) {
+        const N = manualList.length;
+        manualIndex = ((manualIndex % N) + N) % N;
       } else {
-        log("Sheet fetch succeeded, but the selected columns had no non-empty values yet.");
+        manualIndex = 0;
       }
+
+      applyManualCharset();
       return;
     }
 
-    // If cycling is enabled, keep a list of recent prompts from the active column.
-    if (cycleEnabled) {
-      const list = getRecentNonEmptyFromColumn(rows, activeSheetColIndex, CYCLE_MAX_RECENT);
-      if (list.length) {
-        promptList = list;
-        if (cycleIndex >= promptList.length) cycleIndex = 0;
-        log("Updated prompt list from sheet (cycling):", promptList.length);
+    // Cycling modes: use the scope list as the cycle list and apply cycleIndex.
+    if (cycleEnabled || cycleAllEnabled) {
+      promptList = scopeList;
+
+      if (promptList.length) {
+        const N = promptList.length;
+        cycleIndex = ((cycleIndex % N) + N) % N;
       } else {
-        log("Sheet fetch succeeded, but the selected column had no non-empty values yet.");
+        cycleIndex = 0;
       }
+
+      applyCycleCharsetFromIndex();
+      applyPauseButtonLabel();
       return;
     }
 
-    // If cycling is disabled, behave exactly like before (latest only).
-    const v = chooseLatestNonEmptyFromColumn(rows, activeSheetColIndex);
+    // Latest-only mode (default): show the last entry of the scope list (if any).
+    // IMPORTANT:
+    // - This is where your "1/1" bug came from previously: you were hardcoding totals.
+    // - Here we always use the REAL list length.
+    if (scopeList.length) {
+      const N = scopeList.length;
+      const lastIndex = N - 1;
+      const latest = scopeList[lastIndex];
 
-    if (v.length) {
-      charset = v + " "; // Add a space at the end so you can get blanks.
-      log("Updated charset from sheet:", charset);
+      charset = latest + " ";
+      setUnifiedStatus(lastIndex + 1, N);
     } else {
-      log("Sheet fetch succeeded, but the selected column had no non-empty values yet.");
+      setUnifiedStatus(0, 0);
     }
+
+    applyPauseButtonLabel();
   }
 
   function startSheetPolling() {
@@ -307,22 +742,32 @@ window.addEventListener("DOMContentLoaded", () => {
   function setActiveColumnFromSelect() {
     if (!columnSelect) return;
 
-    const parsed = Number(columnSelect.value);
+    const raw = String(columnSelect.value);
+
+    // PURPOSE: Allow selecting ALL columns from the dropdown.
+    if (raw === "ALL") {
+      scopeIsAll = true;
+
+      // Manual/cycle lists depend on scope; keep indices stable where possible.
+      // We do NOT reset cycleIndex here because you asked for resuming from the current line.
+      pollSheetOnce().catch((e) => log("Sheet fetch error:", e));
+      return;
+    }
+
+    // PURPOSE: Single-column selection (B=1, C=2, ...)
+    const parsed = Number(raw);
     if (Number.isFinite(parsed)) {
+      scopeIsAll = false;
       activeSheetColIndex = parsed;
 
-      // Reset cycling index so it starts clean on a new column.
-      cycleIndex = 0;
-
-      // Force a refresh immediately so the new column takes effect right away.
+      // Lists depend on column; keep indices stable by wrapping after refresh.
       pollSheetOnce().catch((e) => log("Sheet fetch error:", e));
-
-      log("Active sheet column index set to:", activeSheetColIndex);
     }
   }
 
   if (columnSelect) {
-    // Default dropdown to B (value "1") unless you change the HTML.
+    // Default dropdown to B unless you change it.
+    // NOTE: This will be overwritten by rebuildColumnSelectFromGviz() after the first poll.
     columnSelect.value = String(activeSheetColIndex);
     columnSelect.addEventListener("change", setActiveColumnFromSelect);
   }
@@ -330,76 +775,175 @@ window.addEventListener("DOMContentLoaded", () => {
   // =============================
   // CYCLING CONTROL (OPERATOR BUTTON)
   // =============================
-  function applyCycleButtonLabel() {
-    if (!btnCycle) return;
-    btnCycle.textContent = cycleEnabled ? "Cycle: ON" : "Cycle: OFF";
-  }
-
   function enableCycling() {
+    // PURPOSE:
+    // Cycle button cycles the CURRENTLY SELECTED SCOPE:
+    // - If dropdown is ALL -> it cycles the ALL combined list.
+    // - If dropdown is a column -> it cycles that column list.
     cycleEnabled = true;
     cycleAllEnabled = false;
-    cycleIndex = 0;
+
+    // Entering cycle clears manual mode.
+    disableManualMode();
+    manualEnabled = false;
+
+    // When starting fresh (not resuming from Pause), keep current index if it already exists,
+    // because you want Cycle to resume from where you left off when you turned it off.
+    cyclePaused = false;
+    pausedMode = null;
+
     applyCycleButtonLabel();
     applyCycleAllButtonLabel();
+    applyPauseButtonLabel();
+
     pollSheetOnce().catch((e) => log("Sheet fetch error:", e));
   }
 
   function disableCycling() {
+    // PURPOSE:
+    // Turn Cycle OFF but keep cycleIndex as-is so turning it back ON resumes from the same line.
     cycleEnabled = false;
-    cycleIndex = 0;
+    cyclePaused = false;
+    pausedMode = null;
+
     applyCycleButtonLabel();
+    applyPauseButtonLabel();
+
+    // Refresh into latest-only mode so status shows real N (not 1/1).
     pollSheetOnce().catch((e) => log("Sheet fetch error:", e));
   }
 
   if (btnCycle) {
     applyCycleButtonLabel();
     btnCycle.addEventListener("click", () => {
-      if (cycleEnabled) disableCycling();
-      else enableCycling();
+      // If paused, Cycle resumes from that paused line.
+      if (cyclePaused) {
+        resumeCyclingFromPause("cycle");
+        return;
+      }
+
+      if (!cycleEnabled) enableCycling();
+      else disableCycling();
     });
   }
 
   // =============================
   // CYCLE ALL CONTROL (OPERATOR BUTTON)
   // =============================
-  function applyCycleAllButtonLabel() {
-    if (!btnCycleAll) return;
-    btnCycleAll.textContent = cycleAllEnabled ? "Cycle ALL: ON" : "Cycle ALL: OFF";
-  }
-
+  // NOTE:
+  // This button forces scopeIsAll = true and cycles across ALL columns explicitly.
   function enableCycleAll() {
+    scopeIsAll = true;
+    if (columnSelect) columnSelect.value = "ALL";
+
     cycleAllEnabled = true;
     cycleEnabled = false;
-    cycleIndex = 0;
+
+    // Entering cycle-all clears manual mode.
+    disableManualMode();
+    manualEnabled = false;
+
+    cyclePaused = false;
+    pausedMode = null;
+
     applyCycleAllButtonLabel();
     applyCycleButtonLabel();
+    applyPauseButtonLabel();
+
     pollSheetOnce().catch((e) => log("Sheet fetch error:", e));
   }
 
   function disableCycleAll() {
+    // PURPOSE:
+    // Turn Cycle ALL OFF but keep cycleIndex as-is so turning it back ON resumes from the same line.
     cycleAllEnabled = false;
-    cycleIndex = 0;
+    cyclePaused = false;
+    pausedMode = null;
+
     applyCycleAllButtonLabel();
+    applyPauseButtonLabel();
+
     pollSheetOnce().catch((e) => log("Sheet fetch error:", e));
   }
 
   if (btnCycleAll) {
     applyCycleAllButtonLabel();
     btnCycleAll.addEventListener("click", () => {
-      if (cycleAllEnabled) disableCycleAll();
-      else enableCycleAll();
+      // If paused, Cycle ALL resumes from that paused line.
+      if (cyclePaused) {
+        resumeCyclingFromPause("cycleAll");
+        return;
+      }
+
+      if (!cycleAllEnabled) enableCycleAll();
+      else disableCycleAll();
     });
   }
 
-  // Advance the charset while cycling is ON.
-  setInterval(() => {
-    if (!cycleEnabled && !cycleAllEnabled) return;
-    if (!promptList.length) return;
+  // =============================
+  // PREV/NEXT CONTROL (OPERATOR BUTTONS)
+  // =============================
+  // REQUIREMENT YOU STATED:
+  // - Prev/Next wraps:
+  //   - At the beginning, Prev goes to the last entry.
+  //   - At the end, Next goes to the first entry.
+  function stepPrev() {
+    if (cycleEnabled || cycleAllEnabled) {
+      // Stop cycling and step the cycle list (wraps).
+      pauseCycling();
+      stepCycle(-1);
+      return;
+    }
 
-    const current = promptList[cycleIndex % promptList.length];
-    charset = current + " "; // Add a space at the end so you can get blanks.
-    cycleIndex = (cycleIndex + 1) % promptList.length;
-  }, CYCLE_EVERY_MS);
+    // Cycling is OFF -> manual stepping (wraps).
+    stepManual(-1);
+  }
+
+  function stepNext() {
+    if (cycleEnabled || cycleAllEnabled) {
+      pauseCycling();
+      stepCycle(1);
+      return;
+    }
+
+    stepManual(1);
+  }
+
+  if (btnManualPrev) {
+    btnManualPrev.addEventListener("click", () => {
+      stepPrev();
+    });
+  }
+
+  if (btnManualNext) {
+    btnManualNext.addEventListener("click", () => {
+      stepNext();
+    });
+  }
+
+  // =============================
+  // CYCLE TIMER (AUTO ADVANCE)
+  // =============================
+  // PURPOSE:
+  // - Advance while cycling is enabled.
+  // - Pause button stops cycling by turning it OFF, so the timer naturally stops advancing.
+  let cycleTimer = null;
+
+  function startCycleTimer() {
+    if (cycleTimer) clearInterval(cycleTimer);
+
+    cycleTimer = setInterval(() => {
+      if (!cycleEnabled && !cycleAllEnabled) return;
+      if (!promptList.length) return;
+
+      // Apply current index, then advance (wraps).
+      applyCycleCharsetFromIndex();
+      const N = promptList.length;
+      cycleIndex = ((cycleIndex + 1) % N + N) % N;
+    }, cycleIntervalMs);
+  }
+
+  startCycleTimer();
 
   // =============================
   // MEDIA CAPTURE
@@ -592,6 +1136,7 @@ window.addEventListener("DOMContentLoaded", () => {
   // =============================
   applyCycleButtonLabel();
   applyCycleAllButtonLabel();
+  applyPauseButtonLabel();
   startSheetPolling();
   log("Ready. Click a capture button.");
 });
