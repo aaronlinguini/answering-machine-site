@@ -655,7 +655,6 @@ window.addEventListener("DOMContentLoaded", () => {
 
     disableManualMode();
 
-    // Keep current index as the currently displayed index.
     cyclePaused = false;
 
     applyCycleButtonLabel();
@@ -857,6 +856,43 @@ window.addEventListener("DOMContentLoaded", () => {
       rafId = null;
     }
 
+    // PURPOSE:
+    // Preserve aspect ratio of the captured video when downsampling into the offscreen grid.
+    // This prevents stretching when the shared window changes shape.
+    function drawVideoIntoOffscreenContain(videoEl, destW, destH) {
+      // Clear to black so letterbox/pillarbox regions are stable.
+      offCtx.setTransform(1, 0, 0, 1, 0, 0);
+      offCtx.imageSmoothingEnabled = false;
+      offCtx.fillStyle = "black";
+      offCtx.fillRect(0, 0, destW, destH);
+
+      const srcW = videoEl.videoWidth;
+      const srcH = videoEl.videoHeight;
+      if (!srcW || !srcH) return;
+
+      const srcAR = srcW / srcH;
+      const destAR = destW / destH;
+
+      let drawW = destW;
+      let drawH = destH;
+
+      if (srcAR > destAR) {
+        // Source is wider than destination: fit width, letterbox top/bottom.
+        drawW = destW;
+        drawH = Math.max(1, Math.round(destW / srcAR));
+      } else {
+        // Source is taller than destination: fit height, pillarbox left/right.
+        drawH = destH;
+        drawW = Math.max(1, Math.round(destH * srcAR));
+      }
+
+      const dx = Math.floor((destW - drawW) / 2);
+      const dy = Math.floor((destH - drawH) / 2);
+
+      // Draw with preserved aspect ratio into the grid.
+      offCtx.drawImage(videoEl, 0, 0, srcW, srcH, dx, dy, drawW, drawH);
+    }
+
     const tick = () => {
       rafId = requestAnimationFrame(tick);
 
@@ -881,8 +917,11 @@ window.addEventListener("DOMContentLoaded", () => {
       off.width = cols;
       off.height = rows;
 
+      // FIX:
+      // Draw into the offscreen grid using "contain" so the capture never stretches
+      // when the shared window changes aspect ratio.
       try {
-        offCtx.drawImage(video, 0, 0, cols, rows);
+        drawVideoIntoOffscreenContain(video, cols, rows);
       } catch (e) {
         log("drawImage error:", e);
         return;
