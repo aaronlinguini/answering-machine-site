@@ -24,20 +24,20 @@ body {
 .ui {
   position: fixed;
   top: 10px;
-  left: 10px;      /* anchor left */
-  right: 10px;     /* allow full width */
-  transform: none; /* remove centering transform that caused reflow jumps */
+  left: 50%;
+  transform: translateX(-50%);
   z-index: 10;
 
   display: flex;
-  flex-wrap: wrap;         /* wrap only when needed */
+  flex-wrap: wrap;
   gap: 10px;
-  align-items: center;
-  justify-content: flex-start; /* stable left-to-right layout */
-  text-align: center;
-}
 
-/* Reserve space so status text doesn't push buttons around */
+  align-items: center;
+  justify-content: center;
+
+  width: max-content;   /* force container to hug its content */
+  max-width: 95vw;      /* prevent overflow on small screens */
+}
 #manual-status {
   min-width: 260px; /* adjust if needed */
   white-space: nowrap;
