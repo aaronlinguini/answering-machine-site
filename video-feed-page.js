@@ -47,11 +47,11 @@ let promptList = [];
 let cycleEnabled = false;
 let cycleIndex = 0;
 
-// Cycle-all state (operator-controlled; affects everyone watching).
-let cycleAllEnabled = false;
-
 // Pause state for cycling (operator-controlled; affects everyone watching).
-// PURPOSE: Pause stops cycling (turns it OFF) while preserving cycleIndex so resuming continues from the same line.
+// PURPOSE:
+// - Pause DOES NOT turn cycling off.
+// - Pause freezes on the current line.
+// - Prev/Next while cycling forces pause and steps.
 let cyclePaused = false;
 
 // Manual browse state (operator-controlled; affects everyone watching).
@@ -81,10 +81,6 @@ let scopeIsAll = false;
 // NOTE: This array is updated dynamically after each GViz poll so newly-added columns are included.
 const CYCLE_ALL_COLS = [1, 2, 3, 4, 5];
 
-// Remembers which cycling mode was active when Pause was pressed.
-// PURPOSE: Pause turns cycling OFF; this lets us resume the same mode later.
-let pausedMode = null; // "cycle" | "cycleAll" | null
-
 // Hidden video element used as the source.
 const video = document.createElement("video");
 video.autoplay = true;
@@ -104,13 +100,8 @@ window.addEventListener("DOMContentLoaded", () => {
   // this will enable cycling controls on the operator page.
   const btnCycle = document.getElementById("btn-cycle");
 
-  // OPTIONAL: If you add a button with id="btn-cycle-all" in video-feed-page.html,
-  // this will enable Cycle ALL controls on the operator page.
-  const btnCycleAll = document.getElementById("btn-cycle-all");
-
   // OPTIONAL: If you add a button with id="btn-pause" in video-feed-page.html,
   // this will enable Pause/Resume for cycling.
-  // IMPORTANT: Pause STOPS cycling (turns it OFF) but preserves the current line.
   const btnPause = document.getElementById("btn-pause");
 
   // OPTIONAL: If you add a button with id="btn-most-recent" in video-feed-page.html,
@@ -123,7 +114,7 @@ window.addEventListener("DOMContentLoaded", () => {
 
   // OPTIONAL: If you add buttons with id="btn-manual-prev" / id="btn-manual-next" in video-feed-page.html,
   // this will enable Prev/Next stepping:
-  // - If cycling is ON, Prev/Next stops cycling and steps the cycle list (wraps).
+  // - If cycling is ON, Prev/Next pauses and steps the cycle list (wraps).
   // - If cycling is OFF, Prev/Next steps the manual list for the selected scope (wraps).
   const btnManualPrev = document.getElementById("btn-manual-prev");
   const btnManualNext = document.getElementById("btn-manual-next");
@@ -147,17 +138,11 @@ window.addEventListener("DOMContentLoaded", () => {
   // =============================
   // STATUS LINE (UNIFIED / ALWAYS ON)
   // =============================
-  // PURPOSE:
-  // - Always display a stable line so the UI layout doesn't shift.
-  // - Never display extra mode words ("manual", "latest", "cycle", etc).
-  // - Always display: "COLUMN X : current / total"
   function setManualStatus(text) {
-    // PURPOSE: Single UI output location shared across ALL modes.
     if (manualStatus) manualStatus.textContent = text;
   }
 
   function colIndexToLetter(idx) {
-    // PURPOSE: Convert 0-based column index to sheet letters (A, B, ..., Z, AA, AB...)
     let n = idx + 1;
     let s = "";
     while (n > 0) {
@@ -169,20 +154,17 @@ window.addEventListener("DOMContentLoaded", () => {
   }
 
   function setUnifiedStatus(position, total) {
-    // PURPOSE: Centralized formatter so EVERY mode prints identical UI text.
     const columnLabel = scopeIsAll ? "ALL" : colIndexToLetter(activeSheetColIndex);
     const p = Number.isFinite(position) && position >= 0 ? position : 0;
     const t = Number.isFinite(total) && total >= 0 ? total : 0;
     setManualStatus(`COLUMN ${columnLabel} : ${p} / ${t}`);
   }
 
-  // Ensure something is visible immediately.
   setUnifiedStatus(0, 0);
 
   // =============================
   // RELAY CONNECT
   // =============================
-  // PURPOSE: Reconnect only when the browser fires a real close/error event.
   let relayReconnectTimer = null;
   let relayReconnectDelayMs = 800;
   const RELAY_RECONNECT_MAX_MS = 8000;
@@ -195,7 +177,6 @@ window.addEventListener("DOMContentLoaded", () => {
   }
 
   function scheduleRelayReconnect() {
-    // PURPOSE: Avoid reconnect storms.
     if (relayReconnectTimer) return;
 
     relayReconnectTimer = setTimeout(() => {
@@ -212,13 +193,10 @@ window.addEventListener("DOMContentLoaded", () => {
   function connectRelay() {
     clearRelayReconnectTimer();
 
-    // Close any existing socket cleanly before replacing it.
     if (relaySocket && (relaySocket.readyState === 0 || relaySocket.readyState === 1)) {
       try {
         relaySocket.close();
-      } catch (e) {
-        // PURPOSE: Keep render running even if relay close throws.
-      }
+      } catch (e) {}
     }
 
     relaySocket = new WebSocket(RELAY_WS_URL);
@@ -245,20 +223,17 @@ window.addEventListener("DOMContentLoaded", () => {
   // CANVAS SIZE (FIXED TO STAGE)
   // =============================
   function resizeCanvasToStage() {
-    // PURPOSE: Keep the render surface tied to the stage box, not the browser window.
     const dpr = window.devicePixelRatio || 1;
-    const rect = stage.getBoundingClientRect(); // CSS pixels
+    const rect = stage.getBoundingClientRect();
 
     canvas.width = Math.floor(rect.width * dpr);
     canvas.height = Math.floor(rect.height * dpr);
 
-    // Draw in CSS pixels with DPR scaling.
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.imageSmoothingEnabled = false;
     ctx.textBaseline = "top";
   }
 
-  // Stage is meant to be fixed-size via CSS, so we size once on load.
   resizeCanvasToStage();
 
   // =============================
@@ -292,8 +267,6 @@ window.addEventListener("DOMContentLoaded", () => {
   }
 
   function getRecentNonEmptyFromColumn(rows, colIndex, maxCount) {
-    // PURPOSE: Collect up to maxCount most recent non-empty strings from a column.
-    // IMPORTANT: Preserves exactly what the user entered (no trimming).
     const out = [];
     for (let i = rows.length - 1; i >= 0; i--) {
       const cell = rows[i]?.[colIndex];
@@ -304,13 +277,11 @@ window.addEventListener("DOMContentLoaded", () => {
       out.push(val);
       if (out.length >= maxCount) break;
     }
-    out.reverse(); // oldest -> newest
+    out.reverse();
     return out;
   }
 
   function getRecentNonEmptyFromMultipleColumns(rows, colIndices, maxPerCol) {
-    // PURPOSE: Build one combined list for ALL-scope operations by pulling recent values from each column.
-    // Order is column-major (B, then C, then D...) while preserving each column’s internal order.
     const combined = [];
     for (const idx of colIndices) {
       const list = getRecentNonEmptyFromColumn(rows, idx, maxPerCol);
@@ -322,22 +293,14 @@ window.addEventListener("DOMContentLoaded", () => {
   // =============================
   // COLUMN DISCOVERY (AUTO-POPULATE DROPDOWN)
   // =============================
-  // PURPOSE:
-  // - Every time the Google Form adds a new question, the response sheet adds a new column.
-  // - GViz exposes those columns in gvizJson.table.cols.
-  // - We rebuild the dropdown from that live list so new columns become selectable automatically.
-  // - We filter out columns that have NO DATA so the dropdown stays clean.
   function rebuildColumnSelectFromGviz(gvizJson, rows) {
     if (!columnSelect) return;
 
     const cols = gvizJson?.table?.cols;
     if (!Array.isArray(cols) || cols.length === 0) return;
 
-    // PURPOSE: Skip column A (index 0). Google Forms response sheets usually store Timestamp there.
     const firstPromptCol = cols.length > 1 ? 1 : 0;
 
-    // PURPOSE: Only show columns that have at least one non-empty value.
-    // This keeps the dropdown clean when new questions exist but have no submissions yet.
     function columnHasAnyData(colIndex) {
       for (let i = 0; i < rows.length; i++) {
         const cell = rows[i]?.[colIndex];
@@ -348,15 +311,13 @@ window.addEventListener("DOMContentLoaded", () => {
       return false;
     }
 
-    // Preserve previous selection in a scope-aware way.
     const prevRaw = String(columnSelect.value);
     const prevScopeIsAll = prevRaw === "ALL";
     const prevCol = Number(prevRaw);
 
-    // Rebuild options from live sheet metadata.
     columnSelect.innerHTML = "";
 
-    // Always include ALL as the first option.
+    // Always include ALL.
     const optAll = document.createElement("option");
     optAll.value = "ALL";
     optAll.textContent = "ALL";
@@ -372,19 +333,13 @@ window.addEventListener("DOMContentLoaded", () => {
 
       const opt = document.createElement("option");
       opt.value = String(i);
-
-      // PURPOSE: Show question text when available.
-      // Example: "D — Prompt?" if your form question has that label.
-      // NOTE: Your unified status line STILL only prints "COLUMN D : x / y".
       opt.textContent = label ? `${letter} — ${label}` : letter;
 
       columnSelect.appendChild(opt);
       included.push(i);
     }
 
-    // PURPOSE: Keep a valid selection even when filtering removes columns.
     if (!included.length) {
-      // If nothing has data yet, fall back to showing B (or first prompt col) so the UI isn't empty.
       const fallback = firstPromptCol;
 
       const letter = colIndexToLetter(fallback);
@@ -402,7 +357,6 @@ window.addEventListener("DOMContentLoaded", () => {
       return;
     }
 
-    // Restore previous selection if it still exists.
     if (prevScopeIsAll) {
       scopeIsAll = true;
       columnSelect.value = "ALL";
@@ -418,8 +372,6 @@ window.addEventListener("DOMContentLoaded", () => {
   }
 
   function getDynamicCycleAllCols(gvizJson) {
-    // PURPOSE: Include every prompt column that exists right now.
-    // Strategy: treat column A (index 0) as Timestamp, and include B onward.
     const cols = gvizJson?.table?.cols;
     if (!Array.isArray(cols)) return [1, 2, 3, 4, 5];
 
@@ -429,11 +381,6 @@ window.addEventListener("DOMContentLoaded", () => {
   }
 
   function buildListForCurrentScope(rows) {
-    // PURPOSE:
-    // Single source of truth for list-building across modes:
-    // - Manual browsing uses this.
-    // - Cycling uses this.
-    // - Most recent mode uses this.
     if (scopeIsAll) {
       return getRecentNonEmptyFromMultipleColumns(rows, CYCLE_ALL_COLS, CYCLE_MAX_RECENT);
     }
@@ -448,68 +395,35 @@ window.addEventListener("DOMContentLoaded", () => {
     btnCycle.textContent = cycleEnabled ? "Cycle: ON" : "Cycle: OFF";
   }
 
-  function applyCycleAllButtonLabel() {
-    if (!btnCycleAll) return;
-    btnCycleAll.textContent = cycleAllEnabled ? "Cycle ALL: ON" : "Cycle ALL: OFF";
-  }
-
   function applyPauseButtonLabel() {
     if (!btnPause) return;
 
-    // PURPOSE:
-    // Pause is meaningful in two cases:
-    // 1) Cycling is ON -> button reads "Pause"
-    // 2) Cycling is OFF because it was paused -> button reads "Resume"
-    if (cycleEnabled || cycleAllEnabled) {
-      btnPause.disabled = false;
+    if (!cycleEnabled) {
       btnPause.textContent = "Pause";
+      btnPause.disabled = true;
       return;
     }
 
-    if (cyclePaused) {
-      btnPause.disabled = false;
-      btnPause.textContent = "Resume";
-      return;
-    }
-
-    btnPause.disabled = true;
-    btnPause.textContent = "Pause";
-  }
-
-  function stopCyclingKeepIndex() {
-    // PURPOSE:
-    // - Stop auto-advance.
-    // - Preserve cycleIndex so resuming continues from the same line.
-    cycleEnabled = false;
-    cycleAllEnabled = false;
-
-    applyCycleButtonLabel();
-    applyCycleAllButtonLabel();
-    applyPauseButtonLabel();
+    btnPause.disabled = false;
+    btnPause.textContent = cyclePaused ? "Resume" : "Pause";
   }
 
   function enableMostRecentMode() {
-    // PURPOSE:
-    // - Force newest-only display for the current scope (COLUMN or ALL).
-    // - Turn off cycling and manual browsing.
     mostRecentEnabled = true;
 
-    cyclePaused = false;
-    pausedMode = null;
-    stopCyclingKeepIndex();
-
-    disableManualMode();
     manualEnabled = false;
+    manualList = [];
+    manualIndex = 0;
 
+    cyclePaused = false;
+    cycleEnabled = false;
+
+    applyCycleButtonLabel();
     applyPauseButtonLabel();
 
-    // Immediately refresh output and status for current scope.
     pollSheetOnce().catch((e) => log("Sheet fetch error:", e));
   }
 
-  // =============================
-  // MOST RECENT CONTROL (OPERATOR BUTTON)
-  // =============================
   if (btnMostRecent) {
     btnMostRecent.addEventListener("click", () => {
       enableMostRecentMode();
@@ -519,56 +433,41 @@ window.addEventListener("DOMContentLoaded", () => {
   // =============================
   // MANUAL BROWSE HELPERS
   // =============================
-  // PURPOSE:
-  // - Manual mode allows the operator to step through entries.
-  // - Status text ALWAYS stays: "COLUMN X : current / total"
   function applyManualCharset() {
-    // PURPOSE: Apply currently selected manual entry to charset AND update status.
     if (!manualList.length) {
       setUnifiedStatus(0, 0);
       return;
     }
 
     const N = manualList.length;
-
-    // Wrap index safely (circular navigation).
     manualIndex = ((manualIndex % N) + N) % N;
 
     const current = manualList[manualIndex];
-
-    // IMPORTANT: trailing space preserves visual blank pixels in renderer.
     charset = current + " ";
 
     setUnifiedStatus(manualIndex + 1, N);
   }
 
   function enableManualMode() {
-    // PURPOSE:
-    // Manual browsing cannot coexist with cycling modes.
-    // Manual mode also turns off most-recent mode because Prev/Next becomes the driver.
     manualEnabled = true;
     mostRecentEnabled = false;
 
     cyclePaused = false;
-    pausedMode = null;
-    stopCyclingKeepIndex();
+    cycleEnabled = false;
 
+    applyCycleButtonLabel();
     applyPauseButtonLabel();
 
-    // Immediately refresh list for selected scope.
     pollSheetOnce().catch((e) => log("Sheet fetch error:", e));
   }
 
   function disableManualMode() {
-    // PURPOSE: Exit manual browsing cleanly.
     manualEnabled = false;
     manualList = [];
     manualIndex = 0;
   }
 
   function stepManual(delta) {
-    // PURPOSE:
-    // Move forward/backward through entries with infinite wrapping.
     if (!manualEnabled) enableManualMode();
     if (!manualList.length) {
       setUnifiedStatus(0, 0);
@@ -583,10 +482,6 @@ window.addEventListener("DOMContentLoaded", () => {
   // =============================
   // CYCLING STEP HELPERS
   // =============================
-  // PURPOSE:
-  // - Apply cycleIndex -> charset.
-  // - Update unified COLUMN status line.
-  // - Navigation wraps infinitely.
   function applyCycleCharsetFromIndex() {
     if (!promptList.length) {
       setUnifiedStatus(0, 0);
@@ -594,13 +489,9 @@ window.addEventListener("DOMContentLoaded", () => {
     }
 
     const N = promptList.length;
-
-    // Wrap safely.
     cycleIndex = ((cycleIndex % N) + N) % N;
 
     const current = promptList[cycleIndex];
-
-    // Preserve renderer spacing behaviour.
     charset = current + " ";
 
     setUnifiedStatus(cycleIndex + 1, N);
@@ -613,83 +504,28 @@ window.addEventListener("DOMContentLoaded", () => {
     }
 
     const N = promptList.length;
-
-    // Wrap infinitely on both ends.
     cycleIndex = ((cycleIndex + delta) % N + N) % N;
-
     applyCycleCharsetFromIndex();
-  }
-
-  function setCycleSpeed(ms) {
-    // PURPOSE:
-    // Runtime adjustment of cycling speed.
-    // Restart timer so change applies immediately.
-    cycleIntervalMs = ms;
-    startCycleTimer();
   }
 
   // =============================
   // PAUSE CONTROL (CYCLE)
   // =============================
-  // REQUIREMENT YOU STATED:
-  // - Pressing Pause STOPS cycling (turns it OFF).
-  // - It stays on the current line.
-  // - Turning Cycle back ON resumes from that same line (cycleIndex preserved).
   function pauseCycling() {
-    // PURPOSE:
-    // - Freeze on the current line.
-    // - Turn cycling OFF while keeping the index so resuming starts from the same line.
-    if (!cycleEnabled && !cycleAllEnabled) return;
-
-    mostRecentEnabled = false;
-
+    if (!cycleEnabled) return;
     cyclePaused = true;
-    pausedMode = cycleAllEnabled ? "cycleAll" : "cycle";
-
-    stopCyclingKeepIndex();
-
-    // Keep the current charset + status stable immediately.
-    applyCycleCharsetFromIndex();
+    applyPauseButtonLabel();
   }
 
-  function resumeCyclingFromPause(preferMode) {
-    // PURPOSE:
-    // - Resume whichever mode was paused.
-    // - If preferMode is provided ("cycle" or "cycleAll"), that wins.
-    if (!cyclePaused) return;
-
-    const mode = preferMode || pausedMode || "cycle";
-
+  function resumeCycling() {
+    if (!cycleEnabled) return;
     cyclePaused = false;
-    pausedMode = null;
-
-    // Resuming cycling exits most-recent mode and manual mode.
-    mostRecentEnabled = false;
-    disableManualMode();
-    manualEnabled = false;
-
-    if (mode === "cycleAll") {
-      cycleAllEnabled = true;
-      cycleEnabled = false;
-    } else {
-      cycleEnabled = true;
-      cycleAllEnabled = false;
-    }
-
-    applyCycleButtonLabel();
-    applyCycleAllButtonLabel();
     applyPauseButtonLabel();
-
-    // Poll refreshes promptList for the current scope and applies charset/status.
-    pollSheetOnce().catch((e) => log("Sheet fetch error:", e));
   }
 
   function togglePauseCycling() {
-    // PURPOSE:
-    // - If cycling is ON -> Pause it (turn it OFF).
-    // - If cycling is paused -> Resume it (turn it back ON).
-    if (cycleEnabled || cycleAllEnabled) pauseCycling();
-    else resumeCyclingFromPause();
+    if (cyclePaused) resumeCycling();
+    else pauseCycling();
   }
 
   if (btnPause) {
@@ -709,20 +545,13 @@ window.addEventListener("DOMContentLoaded", () => {
     const gvizJson = parseGviz(text);
     const rows = gvizRows(gvizJson);
 
-    // PURPOSE: Keep the operator dropdown synced to the sheet's current columns.
-    // This makes new Google Form questions appear automatically as selectable options.
-    // This also filters out columns that currently have NO DATA.
     rebuildColumnSelectFromGviz(gvizJson, rows);
 
-    // PURPOSE: Keep ALL-scope columns synced to the sheet's current columns.
-    // This replaces the fixed B..F list with whatever exists now (B..last).
     const dynamicCols = getDynamicCycleAllCols(gvizJson);
     CYCLE_ALL_COLS.splice(0, CYCLE_ALL_COLS.length, ...dynamicCols);
 
-    // Build the list for the current scope once, then route it to the current mode.
     const scopeList = buildListForCurrentScope(rows);
 
-    // Manual mode: browse the scope list and apply current selection.
     if (manualEnabled) {
       manualList = scopeList;
 
@@ -737,8 +566,7 @@ window.addEventListener("DOMContentLoaded", () => {
       return;
     }
 
-    // Cycling modes: use the scope list as the cycle list and apply cycleIndex.
-    if (cycleEnabled || cycleAllEnabled) {
+    if (cycleEnabled) {
       promptList = scopeList;
 
       if (promptList.length) {
@@ -753,10 +581,6 @@ window.addEventListener("DOMContentLoaded", () => {
       return;
     }
 
-    // Most recent mode:
-    // REQUIREMENT YOU STATED:
-    // - A button (and default behavior) that forces newest-only display for selected scope.
-    // - Status uses the REAL list length and current position within that list.
     if (mostRecentEnabled) {
       if (scopeList.length) {
         const N = scopeList.length;
@@ -773,9 +597,6 @@ window.addEventListener("DOMContentLoaded", () => {
       return;
     }
 
-    // Fallback:
-    // If mostRecentEnabled was manually turned off and no other mode is active,
-    // force it back on so the page behaves predictably.
     mostRecentEnabled = true;
     if (scopeList.length) {
       const N = scopeList.length;
@@ -806,30 +627,21 @@ window.addEventListener("DOMContentLoaded", () => {
 
     const raw = String(columnSelect.value);
 
-    // PURPOSE: Allow selecting ALL columns from the dropdown.
     if (raw === "ALL") {
       scopeIsAll = true;
-
-      // Lists depend on scope; keep indices stable where possible.
-      // We do NOT reset cycleIndex here because you asked for resuming from the current line.
       pollSheetOnce().catch((e) => log("Sheet fetch error:", e));
       return;
     }
 
-    // PURPOSE: Single-column selection (B=1, C=2, ...)
     const parsed = Number(raw);
     if (Number.isFinite(parsed)) {
       scopeIsAll = false;
       activeSheetColIndex = parsed;
-
-      // Lists depend on column; keep indices stable by wrapping after refresh.
       pollSheetOnce().catch((e) => log("Sheet fetch error:", e));
     }
   }
 
   if (columnSelect) {
-    // Default dropdown to B unless you change it.
-    // NOTE: This will be overwritten by rebuildColumnSelectFromGviz() after the first poll.
     columnSelect.value = String(activeSheetColIndex);
     columnSelect.addEventListener("change", setActiveColumnFromSelect);
   }
@@ -838,43 +650,25 @@ window.addEventListener("DOMContentLoaded", () => {
   // CYCLING CONTROL (OPERATOR BUTTON)
   // =============================
   function enableCycling() {
-    // PURPOSE:
-    // Cycle button cycles the CURRENTLY SELECTED SCOPE:
-    // - If dropdown is ALL -> it cycles the ALL combined list.
-    // - If dropdown is a column -> it cycles that column list.
     cycleEnabled = true;
-    cycleAllEnabled = false;
-
-    // Cycling exits most-recent mode.
     mostRecentEnabled = false;
 
-    // Entering cycle clears manual mode.
     disableManualMode();
-    manualEnabled = false;
 
-    // When starting fresh (not resuming from Pause), keep current index if it already exists,
-    // because you want Cycle to resume from where you left off when you turned it off.
+    // Keep current index as the currently displayed index.
     cyclePaused = false;
-    pausedMode = null;
 
     applyCycleButtonLabel();
-    applyCycleAllButtonLabel();
     applyPauseButtonLabel();
 
     pollSheetOnce().catch((e) => log("Sheet fetch error:", e));
   }
 
   function disableCycling() {
-    // PURPOSE:
-    // Turn Cycle OFF but keep cycleIndex as-is so turning it back ON resumes from the same line.
     cycleEnabled = false;
-
-    // Exiting cycle returns to most-recent mode automatically.
-    mostRecentEnabled = true;
-
-    // If Cycle is being turned off directly, Pause state is cleared.
     cyclePaused = false;
-    pausedMode = null;
+
+    mostRecentEnabled = true;
 
     applyCycleButtonLabel();
     applyPauseButtonLabel();
@@ -885,104 +679,31 @@ window.addEventListener("DOMContentLoaded", () => {
   if (btnCycle) {
     applyCycleButtonLabel();
     btnCycle.addEventListener("click", () => {
-      // If paused, Cycle resumes from that paused line.
-      if (cyclePaused) {
-        resumeCyclingFromPause("cycle");
-        return;
-      }
-
       if (!cycleEnabled) enableCycling();
       else disableCycling();
     });
   }
 
   // =============================
-  // CYCLE ALL CONTROL (OPERATOR BUTTON)
-  // =============================
-  // NOTE:
-  // This button forces scopeIsAll = true and cycles across ALL columns explicitly.
-  function enableCycleAll() {
-    scopeIsAll = true;
-    if (columnSelect) columnSelect.value = "ALL";
-
-    cycleAllEnabled = true;
-    cycleEnabled = false;
-
-    // Cycling exits most-recent mode.
-    mostRecentEnabled = false;
-
-    // Entering cycle-all clears manual mode.
-    disableManualMode();
-    manualEnabled = false;
-
-    cyclePaused = false;
-    pausedMode = null;
-
-    applyCycleAllButtonLabel();
-    applyCycleButtonLabel();
-    applyPauseButtonLabel();
-
-    pollSheetOnce().catch((e) => log("Sheet fetch error:", e));
-  }
-
-  function disableCycleAll() {
-    // PURPOSE:
-    // Turn Cycle ALL OFF but keep cycleIndex as-is so turning it back ON resumes from the same line.
-    cycleAllEnabled = false;
-
-    // Exiting cycle-all returns to most-recent mode automatically.
-    mostRecentEnabled = true;
-
-    // If Cycle ALL is being turned off directly, Pause state is cleared.
-    cyclePaused = false;
-    pausedMode = null;
-
-    applyCycleAllButtonLabel();
-    applyPauseButtonLabel();
-
-    pollSheetOnce().catch((e) => log("Sheet fetch error:", e));
-  }
-
-  if (btnCycleAll) {
-    applyCycleAllButtonLabel();
-    btnCycleAll.addEventListener("click", () => {
-      // If paused, Cycle ALL resumes from that paused line.
-      if (cyclePaused) {
-        resumeCyclingFromPause("cycleAll");
-        return;
-      }
-
-      if (!cycleAllEnabled) enableCycleAll();
-      else disableCycleAll();
-    });
-  }
-
-  // =============================
   // PREV/NEXT CONTROL (OPERATOR BUTTONS)
   // =============================
-  // REQUIREMENT YOU STATED:
-  // - Prev/Next wraps:
-  //   - At the beginning, Prev goes to the last entry.
-  //   - At the end, Next goes to the first entry.
   function stepPrev() {
-    if (cycleEnabled || cycleAllEnabled) {
-      // Stop cycling and step the cycle list (wraps).
-      pauseCycling();
+    if (cycleEnabled) {
+      cyclePaused = true;
+      applyPauseButtonLabel();
       stepCycle(-1);
       return;
     }
-
-    // Cycling is OFF -> manual stepping (wraps).
     stepManual(-1);
   }
 
   function stepNext() {
-    if (cycleEnabled || cycleAllEnabled) {
-      pauseCycling();
+    if (cycleEnabled) {
+      cyclePaused = true;
+      applyPauseButtonLabel();
       stepCycle(1);
       return;
     }
-
     stepManual(1);
   }
 
@@ -1001,22 +722,22 @@ window.addEventListener("DOMContentLoaded", () => {
   // =============================
   // CYCLE TIMER (AUTO ADVANCE)
   // =============================
-  // PURPOSE:
-  // - Advance while cycling is enabled.
-  // - Pause button stops cycling by turning it OFF, so the timer naturally stops advancing.
+  // Keeps cycleIndex aligned to the on-screen item, and prevents advancing while paused.
   let cycleTimer = null;
 
   function startCycleTimer() {
     if (cycleTimer) clearInterval(cycleTimer);
 
     cycleTimer = setInterval(() => {
-      if (!cycleEnabled && !cycleAllEnabled) return;
+      if (!cycleEnabled) return;
+      if (cyclePaused) return;
       if (!promptList.length) return;
 
-      // Apply current index, then advance (wraps).
-      applyCycleCharsetFromIndex();
       const N = promptList.length;
+
+      // Advance first, then render (so cycleIndex always equals the visible line).
       cycleIndex = ((cycleIndex + 1) % N + N) % N;
+      applyCycleCharsetFromIndex();
     }, cycleIntervalMs);
   }
 
@@ -1090,12 +811,10 @@ window.addEventListener("DOMContentLoaded", () => {
     btnScreen.disabled = false;
     btnWebcam.disabled = false;
 
-    // Clear the canvas to black.
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.fillStyle = "black";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-    // Re-apply stage sizing transform.
     resizeCanvasToStage();
 
     log("Stopped.");
@@ -1116,14 +835,11 @@ window.addEventListener("DOMContentLoaded", () => {
     if (!relaySocket) return;
     if (relaySocket.readyState !== 1) return;
 
-    // Backpressure: if the socket is still flushing previous frames, skip this one.
-    // This keeps the viewer live instead of seconds behind.
-    const MAX_BUFFERED_BYTES = 1_000_000; // ~1MB
+    const MAX_BUFFERED_BYTES = 1_000_000;
     if (relaySocket.bufferedAmount > MAX_BUFFERED_BYTES) return;
 
     const frame = canvas.toDataURL(BROADCAST_FORMAT, BROADCAST_QUALITY);
 
-    // PURPOSE: If send throws, it counts as a real failure and we reconnect with backoff.
     try {
       relaySocket.send(frame);
     } catch (e) {
@@ -1144,7 +860,6 @@ window.addEventListener("DOMContentLoaded", () => {
     const tick = () => {
       rafId = requestAnimationFrame(tick);
 
-      // IMPORTANT: size comes from the stage, not the viewport, so window resizing doesn't warp output.
       const rect = stage.getBoundingClientRect();
       const viewW = rect.width;
       const viewH = rect.height;
@@ -1212,7 +927,6 @@ window.addEventListener("DOMContentLoaded", () => {
   // STARTUP
   // =============================
   applyCycleButtonLabel();
-  applyCycleAllButtonLabel();
   applyPauseButtonLabel();
   startSheetPolling();
   log("Ready. Click a capture button.");
