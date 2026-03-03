@@ -60,10 +60,15 @@ let manualEnabled = false;
 let manualList = []; // oldest -> newest
 let manualIndex = 0;
 
+// Most-recent mode state (operator-controlled; affects everyone watching).
+// PURPOSE: Force the system to display ONLY the newest entry from the selected scope (column or ALL).
+// IMPORTANT: This mode is the default when cycling and manual browsing are OFF.
+let mostRecentEnabled = true;
+
 // How often to advance when cycling is ON.
 let cycleIntervalMs = 2500;
 
-// How many recent submissions to use for lists (manual/cycle/latest).
+// How many recent submissions to use for lists (manual/cycle/most recent).
 const CYCLE_MAX_RECENT = 30;
 
 // Which sheet column we are currently reading from (0-based): 1=B, 2=C, 3=D...
@@ -107,6 +112,10 @@ window.addEventListener("DOMContentLoaded", () => {
   // this will enable Pause/Resume for cycling.
   // IMPORTANT: Pause STOPS cycling (turns it OFF) but preserves the current line.
   const btnPause = document.getElementById("btn-pause");
+
+  // OPTIONAL: If you add a button with id="btn-most-recent" in video-feed-page.html,
+  // this will force "most recent only" mode for the selected scope (column or ALL).
+  const btnMostRecent = document.getElementById("btn-most-recent");
 
   // OPTIONAL: If you add a select with id="column-select" in video-feed-page.html,
   // this will enable switching which sheet column we read from.
@@ -424,7 +433,7 @@ window.addEventListener("DOMContentLoaded", () => {
     // Single source of truth for list-building across modes:
     // - Manual browsing uses this.
     // - Cycling uses this.
-    // - Latest-only uses this.
+    // - Most recent mode uses this.
     if (scopeIsAll) {
       return getRecentNonEmptyFromMultipleColumns(rows, CYCLE_ALL_COLS, CYCLE_MAX_RECENT);
     }
@@ -479,6 +488,34 @@ window.addEventListener("DOMContentLoaded", () => {
     applyPauseButtonLabel();
   }
 
+  function enableMostRecentMode() {
+    // PURPOSE:
+    // - Force newest-only display for the current scope (COLUMN or ALL).
+    // - Turn off cycling and manual browsing.
+    mostRecentEnabled = true;
+
+    cyclePaused = false;
+    pausedMode = null;
+    stopCyclingKeepIndex();
+
+    disableManualMode();
+    manualEnabled = false;
+
+    applyPauseButtonLabel();
+
+    // Immediately refresh output and status for current scope.
+    pollSheetOnce().catch((e) => log("Sheet fetch error:", e));
+  }
+
+  // =============================
+  // MOST RECENT CONTROL (OPERATOR BUTTON)
+  // =============================
+  if (btnMostRecent) {
+    btnMostRecent.addEventListener("click", () => {
+      enableMostRecentMode();
+    });
+  }
+
   // =============================
   // MANUAL BROWSE HELPERS
   // =============================
@@ -508,7 +545,9 @@ window.addEventListener("DOMContentLoaded", () => {
   function enableManualMode() {
     // PURPOSE:
     // Manual browsing cannot coexist with cycling modes.
+    // Manual mode also turns off most-recent mode because Prev/Next becomes the driver.
     manualEnabled = true;
+    mostRecentEnabled = false;
 
     cyclePaused = false;
     pausedMode = null;
@@ -602,6 +641,8 @@ window.addEventListener("DOMContentLoaded", () => {
     // - Turn cycling OFF while keeping the index so resuming starts from the same line.
     if (!cycleEnabled && !cycleAllEnabled) return;
 
+    mostRecentEnabled = false;
+
     cyclePaused = true;
     pausedMode = cycleAllEnabled ? "cycleAll" : "cycle";
 
@@ -622,7 +663,8 @@ window.addEventListener("DOMContentLoaded", () => {
     cyclePaused = false;
     pausedMode = null;
 
-    // Manual is mutually exclusive.
+    // Resuming cycling exits most-recent mode and manual mode.
+    mostRecentEnabled = false;
     disableManualMode();
     manualEnabled = false;
 
@@ -711,16 +753,36 @@ window.addEventListener("DOMContentLoaded", () => {
       return;
     }
 
-    // Latest-only mode (default): show the last entry of the scope list (if any).
-    // IMPORTANT:
-    // - This is where your "1/1" bug came from previously: you were hardcoding totals.
-    // - Here we always use the REAL list length.
+    // Most recent mode:
+    // REQUIREMENT YOU STATED:
+    // - A button (and default behavior) that forces newest-only display for selected scope.
+    // - Status uses the REAL list length and current position within that list.
+    if (mostRecentEnabled) {
+      if (scopeList.length) {
+        const N = scopeList.length;
+        const lastIndex = N - 1;
+        const newest = scopeList[lastIndex];
+
+        charset = newest + " ";
+        setUnifiedStatus(lastIndex + 1, N);
+      } else {
+        setUnifiedStatus(0, 0);
+      }
+
+      applyPauseButtonLabel();
+      return;
+    }
+
+    // Fallback:
+    // If mostRecentEnabled was manually turned off and no other mode is active,
+    // force it back on so the page behaves predictably.
+    mostRecentEnabled = true;
     if (scopeList.length) {
       const N = scopeList.length;
       const lastIndex = N - 1;
-      const latest = scopeList[lastIndex];
+      const newest = scopeList[lastIndex];
 
-      charset = latest + " ";
+      charset = newest + " ";
       setUnifiedStatus(lastIndex + 1, N);
     } else {
       setUnifiedStatus(0, 0);
@@ -748,7 +810,7 @@ window.addEventListener("DOMContentLoaded", () => {
     if (raw === "ALL") {
       scopeIsAll = true;
 
-      // Manual/cycle lists depend on scope; keep indices stable where possible.
+      // Lists depend on scope; keep indices stable where possible.
       // We do NOT reset cycleIndex here because you asked for resuming from the current line.
       pollSheetOnce().catch((e) => log("Sheet fetch error:", e));
       return;
@@ -783,6 +845,9 @@ window.addEventListener("DOMContentLoaded", () => {
     cycleEnabled = true;
     cycleAllEnabled = false;
 
+    // Cycling exits most-recent mode.
+    mostRecentEnabled = false;
+
     // Entering cycle clears manual mode.
     disableManualMode();
     manualEnabled = false;
@@ -803,13 +868,17 @@ window.addEventListener("DOMContentLoaded", () => {
     // PURPOSE:
     // Turn Cycle OFF but keep cycleIndex as-is so turning it back ON resumes from the same line.
     cycleEnabled = false;
+
+    // Exiting cycle returns to most-recent mode automatically.
+    mostRecentEnabled = true;
+
+    // If Cycle is being turned off directly, Pause state is cleared.
     cyclePaused = false;
     pausedMode = null;
 
     applyCycleButtonLabel();
     applyPauseButtonLabel();
 
-    // Refresh into latest-only mode so status shows real N (not 1/1).
     pollSheetOnce().catch((e) => log("Sheet fetch error:", e));
   }
 
@@ -839,6 +908,9 @@ window.addEventListener("DOMContentLoaded", () => {
     cycleAllEnabled = true;
     cycleEnabled = false;
 
+    // Cycling exits most-recent mode.
+    mostRecentEnabled = false;
+
     // Entering cycle-all clears manual mode.
     disableManualMode();
     manualEnabled = false;
@@ -857,6 +929,11 @@ window.addEventListener("DOMContentLoaded", () => {
     // PURPOSE:
     // Turn Cycle ALL OFF but keep cycleIndex as-is so turning it back ON resumes from the same line.
     cycleAllEnabled = false;
+
+    // Exiting cycle-all returns to most-recent mode automatically.
+    mostRecentEnabled = true;
+
+    // If Cycle ALL is being turned off directly, Pause state is cleared.
     cyclePaused = false;
     pausedMode = null;
 
